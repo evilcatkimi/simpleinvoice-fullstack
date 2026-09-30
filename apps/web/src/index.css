@@ -1,0 +1,20 @@
+/* Scan only the app sources for class names (not README, Dockerfile…), so every build
+   environment generates the same CSS. */
+@import 'tailwindcss' source('.');
+
+@layer base {
+  /* Keeps focused or scrolled-to elements clear of the sticky header (h-16 = 4rem). */
+  html {
+    scroll-padding-top: 5rem;
+  }
+
+  body {
+    @apply bg-slate-50 text-slate-900 antialiased;
+  }
+
+  /* Tailwind's preflight makes buttons `cursor: default`; clickable things should look clickable. */
+  button:not(:disabled),
+  [role='button']:not(:disabled) {
+    cursor: pointer;
+  }
+}

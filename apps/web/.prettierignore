@@ -1,0 +1,4 @@
+dist
+coverage
+.omc
+package-lock.json
