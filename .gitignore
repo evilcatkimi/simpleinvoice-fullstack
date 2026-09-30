@@ -1,0 +1,27 @@
+# Dependencies & build output
+node_modules/
+dist/
+build/
+coverage/
+# ...but not the source of the coverage-merge tool
+!apps/api/test/coverage/
+*.tsbuildinfo
+
+# Environment — secrets never leave the machine
+.env
+.env.*
+!.env.example
+
+# Test artefacts
+tests/e2e/test-results/
+tests/e2e/playwright-report/
+tests/e2e/.auth/
+apps/web/test-results/
+
+# Tooling / OS
+.omc/
+.DS_Store
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.log

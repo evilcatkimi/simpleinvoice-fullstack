@@ -1,0 +1,11 @@
+# Only sources and the lockfile go into the build context; dependencies are installed fresh.
+node_modules
+dist
+coverage
+test-results
+.omc
+*.log
+.env
+.env.*
+Dockerfile
+.dockerignore

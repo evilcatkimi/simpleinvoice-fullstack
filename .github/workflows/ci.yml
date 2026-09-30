@@ -1,0 +1,131 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Least privilege for the workflow token: jobs only need to read the repository.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # @scarf/scarf (a transitive dependency of @nestjs/swagger) reports installs from a postinstall script: opt out.
+  SCARF_ANALYTICS: "false"
+
+jobs:
+  api:
+    name: API · lint, typecheck, unit, e2e, build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/api
+    services:
+      postgres:
+        image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24  # same digest as infra/postgres/Dockerfile
+        env:
+          POSTGRES_USER: simple_invoice
+          POSTGRES_PASSWORD: ci-only-password
+          POSTGRES_DB: simple_invoice
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U simple_invoice -d simple_invoice"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      # Each e2e run creates its own simple_invoice_<pid>_test database plus per-run owner/app roles (with the real
+      # infra/postgres role script, run through psql, which the runner image provides), migrates as the owner, boots
+      # the API as the least-privilege app role, and drops everything afterwards. Only that setup/teardown uses the
+      # service's admin role below.
+      DB_HOST: localhost
+      DB_PORT: 5432
+      E2E_DB_ADMIN_USER: simple_invoice
+      E2E_DB_ADMIN_PASSWORD: ci-only-password
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5.0.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: apps/api/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run format:check
+      - run: npm run typecheck
+      - name: Unit tests (coverage thresholds enforced)
+        run: npm run test:cov
+      - run: npm run test:e2e
+      - run: npm run build
+      - name: Dependency audit (production dependencies)
+        run: npm audit --omit=dev --audit-level=high
+
+  web:
+    name: Web · lint, typecheck, unit, build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/web
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5.0.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: apps/web/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npm run format:check
+      - run: npm run typecheck
+      - name: Unit tests (coverage thresholds enforced)
+        run: npm run test:coverage
+      - run: npm run build
+      - name: Dependency audit (production dependencies)
+        run: npm audit --omit=dev --audit-level=high
+
+  e2e:
+    name: Full stack · docker compose + Playwright
+    needs: [api, web]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5.0.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: tests/e2e/package-lock.json
+      # Static checks first: Playwright strips types without checking them, so fail fast before building images.
+      - name: Install and check the Playwright suite
+        working-directory: tests/e2e
+        run: |
+          npm ci
+          npm run typecheck
+          npm run lint
+          npm run format:check
+      - name: Generate .env with random secrets
+        run: ./scripts/init-env.sh
+      - name: Build and start db, api and web
+        run: docker compose -f docker-compose.yml -f tests/e2e/docker-compose.e2e.yml up -d --build --wait
+      - name: Install Chromium
+        working-directory: tests/e2e
+        run: npx playwright install --with-deps chromium
+      - name: Run Playwright
+        working-directory: tests/e2e
+        env:
+          CI: "true"
+        run: npm test
+      - name: Container logs
+        if: failure()
+        run: docker compose logs --no-color
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
+        if: failure()
+        with:
+          name: playwright-report
+          path: tests/e2e/playwright-report
+          retention-days: 7
+      - name: Tear down
+        if: always()
+        run: docker compose down -v

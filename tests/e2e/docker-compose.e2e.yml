@@ -1,0 +1,10 @@
+# Compose override for the Playwright suite. From the repository root:
+#   docker compose -f docker-compose.yml -f tests/e2e/docker-compose.e2e.yml up -d --build --wait
+#
+# Every browser request reaches the API through nginx, i.e. from a single client IP, so the
+# production login limit (5 attempts per minute) would throttle back-to-back test runs. Only that
+# limit is raised, and only for this stack; everything else is the regular configuration.
+services:
+  api:
+    environment:
+      THROTTLE_LOGIN_LIMIT: '1000'

@@ -1,0 +1,30 @@
+# Weekly dependency updates, grouped per app so each PR stays reviewable.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /apps/api
+    schedule:
+      interval: weekly
+    groups:
+      api-dependencies:
+        patterns: ["*"]
+  - package-ecosystem: npm
+    directory: /apps/web
+    schedule:
+      interval: weekly
+    groups:
+      web-dependencies:
+        patterns: ["*"]
+  - package-ecosystem: npm
+    directory: /tests/e2e
+    schedule:
+      interval: weekly
+  - package-ecosystem: docker
+    # Base images are pinned by digest; these PRs keep the digests current.
+    directories: [/apps/api, /apps/web, /infra/postgres]
+    schedule:
+      interval: weekly
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

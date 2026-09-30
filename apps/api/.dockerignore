@@ -1,0 +1,13 @@
+# Only package manifests, build configs and src/ are needed to build the image.
+node_modules
+dist
+coverage
+test
+**/*.spec.ts
+**/testing
+.env
+.env.*
+*.log
+Dockerfile
+.dockerignore
+.omc
