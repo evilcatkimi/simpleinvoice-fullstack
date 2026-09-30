@@ -1,0 +1,4 @@
+# Shell scripts run inside Linux containers (db initdb, API entrypoint) and via sh/make on the host:
+# they must keep LF line endings even on a Windows checkout with core.autocrlf=true.
+*.sh text eol=lf
+Makefile text eol=lf
