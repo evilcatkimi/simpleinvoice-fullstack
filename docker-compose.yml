@@ -1,0 +1,245 @@
+# SimpleInvoice — full stack in one command, from a fresh clone:
+#   docker compose up --build  # (or: make up)
+#
+# No .env is needed: on the first start the one-shot `secrets` service generates the database passwords and the JWT
+# key into the `secrets` volume. Any value set in .env (see .env.example) takes precedence over its generated file.
+# `docker compose down -v` removes the data and the secrets together; they must go together, because the database
+# roles are created with the passwords present when the volume is first initialised.
+#
+# Web      http://localhost:${WEB_PORT:-3000}   (nginx: the SPA plus /api/* proxied to the API — the entry point)
+# API      http://localhost:${API_PORT:-4000}   (127.0.0.1 only: Swagger, curl and scripts on this machine)
+# Swagger  http://localhost:${API_PORT:-4000}/api/docs
+# Postgres 127.0.0.1:${DB_HOST_PORT:-5434}      (loopback only — never exposed to the network)
+#
+# Two networks: `edge` (web, api) and `data` (migrate, api, db), so nginx cannot reach PostgreSQL. nginx has a fixed
+# address on `edge`, the only peer whose X-Forwarded-For the API trusts. A stack created before this layout needs one
+# `docker compose down` (the volume is kept), because compose does not change the subnet of an existing network.
+# The database roles are created when the volume is first initialised: an older volume needs `make reset`.
+
+name: simple-invoice
+
+# Applied to every service: no privilege escalation, restart on failure, and bounded logs (the default json-file
+# driver keeps logs forever and eventually fills the disk).
+x-base: &base
+  security_opt:
+    - no-new-privileges:true
+  restart: unless-stopped
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+# Applied to the stateless containers: nothing is written outside /tmp and no Linux capability is kept.
+x-locked-down: &locked-down
+  read_only: true
+  tmpfs:
+    - /tmp
+  cap_drop:
+    - ALL
+
+# Shared by the two containers that run the API image (migrate and api).
+x-api-db-env: &api-db-env
+  NODE_ENV: production
+  DB_HOST: db
+  DB_PORT: 5432
+  DB_NAME: ${POSTGRES_DB:-simple_invoice}
+  DB_SSL: "false"
+  APP_TIMEZONE: ${APP_TIMEZONE:-UTC}
+  # One work factor for both: the login timing must not tell the seeded account from an unknown e-mail.
+  BCRYPT_COST: ${BCRYPT_COST:-12}
+
+services:
+  # One-shot: creates the random secrets on the first start (kept afterwards), each file readable only by the process
+  # user that needs it (infra/postgres/generate-secrets.sh). Runs from the db image: nothing extra to pull.
+  secrets:
+    <<: [*base, *locked-down]
+    restart: "no"
+    image: simple-invoice-db:${IMAGE_TAG:-local}
+    pull_policy: never
+    entrypoint: ["generate-secrets.sh"]
+    user: "0:0"
+    volumes:
+      - secrets:/run/secrets
+    network_mode: none
+    # Only what it takes to hand each file to its owner.
+    cap_add:
+      - CHOWN
+      - FOWNER
+    healthcheck:
+      disable: true
+
+  db:
+    <<: *base
+    # The official image plus the one-time role setup (infra/postgres/initdb/01-app-roles.sh).
+    build:
+      context: ./infra/postgres
+    image: simple-invoice-db:${IMAGE_TAG:-local}
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-simple_invoice}
+      # Empty = the generated file (infra/postgres/entrypoint.sh); a value from .env wins.
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-}
+      POSTGRES_DB: ${POSTGRES_DB:-simple_invoice}
+      # The two roles the application uses (created on an empty volume only).
+      DB_MIGRATION_USER: ${DB_MIGRATION_USER:-simple_invoice_owner}
+      DB_MIGRATION_PASSWORD: ${DB_MIGRATION_PASSWORD:-}
+      DB_APP_USER: ${DB_USER:-simple_invoice_app}
+      DB_APP_PASSWORD: ${DB_PASSWORD:-}
+    volumes:
+      - db-data:/var/lib/postgresql/data
+      - secrets:/run/secrets:ro
+    depends_on:
+      secrets:
+        condition: service_completed_successfully
+    ports:
+      - "127.0.0.1:${DB_HOST_PORT:-5434}:5432"
+    networks:
+      - data
+    cap_drop:
+      - ALL
+    # Only what the postgres entrypoint needs to prepare the data directory and switch to the postgres user.
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
+    # Docker's 64 MB default /dev/shm is too small for PostgreSQL's parallel query workers.
+    shm_size: 128mb
+    mem_limit: 1g
+    cpus: "1.0"
+    pids_limit: 200
+    healthcheck:
+      # Over TCP on purpose: while the volume is being initialised, the entrypoint runs a temporary server that only
+      # listens on the Unix socket. A socket check would report healthy too early and `migrate` (which connects over
+      # TCP) would start against a server that is about to restart.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      start_period: 30s
+      retries: 20
+
+  # One-shot: applies the migrations and the idempotent seed as the schema owner, then exits. The API starts only
+  # once it has succeeded, and never holds DDL credentials or the seed password itself.
+  migrate:
+    <<: [*base, *locked-down]
+    restart: "no"
+    # The api service builds this image; never try to pull it from a registry.
+    image: simple-invoice-api:${IMAGE_TAG:-local}
+    pull_policy: never
+    command: ["migrate"]
+    # Not the API's uid (1000): the schema owner's password and the JWT key are each readable by one of the two.
+    user: "1001:1001"
+    environment:
+      <<: *api-db-env
+      DB_USER: ${DB_MIGRATION_USER:-simple_invoice_owner}
+      DB_PASSWORD: ${DB_MIGRATION_PASSWORD:-}
+      DB_PASSWORD_FILE: /run/secrets/db_migration_password
+      SEED_ADMIN_EMAIL: ${SEED_ADMIN_EMAIL:-reviewer@simpleinvoice.dev}
+      # The reviewer account the brief asks for, documented in README.md: a public demo credential, not a secret.
+      SEED_ADMIN_PASSWORD: ${SEED_ADMIN_PASSWORD:-Reviewer@2026}
+      # With NODE_ENV=production the seed refuses the documented demo password unless this review stack opts in.
+      # Anywhere else: set a unique SEED_ADMIN_PASSWORD and SEED_ALLOW_DEMO_PASSWORD=false in .env.
+      SEED_ALLOW_DEMO_PASSWORD: ${SEED_ALLOW_DEMO_PASSWORD:-true}
+      SEED_RESET_ADMIN_PASSWORD: ${SEED_RESET_ADMIN_PASSWORD:-false}
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - secrets:/run/secrets:ro
+    networks:
+      - data
+    mem_limit: 512m
+    cpus: "1.0"
+    pids_limit: 100
+    # The image's health check probes the API, which this container never starts.
+    healthcheck:
+      disable: true
+
+  api:
+    <<: [*base, *locked-down]
+    build:
+      context: ./apps/api
+    image: simple-invoice-api:${IMAGE_TAG:-local}
+    environment:
+      <<: *api-db-env
+      PORT: 4000
+      # The runtime role: SELECT and INSERT on the application tables, nothing else.
+      DB_USER: ${DB_USER:-simple_invoice_app}
+      DB_PASSWORD: ${DB_PASSWORD:-}
+      DB_PASSWORD_FILE: /run/secrets/db_password
+      JWT_SECRET: ${JWT_SECRET:-}
+      JWT_SECRET_FILE: /run/secrets/jwt_secret
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-3600}
+      JWT_ISSUER: ${JWT_ISSUER:-simple-invoice-api}
+      JWT_AUDIENCE: ${JWT_AUDIENCE:-simple-invoice-web}
+      COOKIE_SECURE: ${COOKIE_SECURE:-false}
+      # Empty = no CORS: the SPA is same-origin behind nginx.
+      CORS_ORIGINS: ${CORS_ORIGINS:-}
+      # The assessment asks for Swagger at /api/docs; the API's own default is off in production.
+      SWAGGER_ENABLED: ${SWAGGER_ENABLED:-true}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      THROTTLE_LOGIN_LIMIT: ${THROTTLE_LOGIN_LIMIT:-5}
+      THROTTLE_LOGIN_TTL_SECONDS: ${THROTTLE_LOGIN_TTL_SECONDS:-60}
+      LOGIN_MAX_FAILED_ATTEMPTS: ${LOGIN_MAX_FAILED_ATTEMPTS:-10}
+      LOGIN_FAILURE_WINDOW_SECONDS: ${LOGIN_FAILURE_WINDOW_SECONDS:-900}
+      # Only nginx (its fixed address on `edge`) may set the client IP through X-Forwarded-For. Deliberately not
+      # TRUST_PROXY from .env, which is for running the API outside Docker.
+      TRUST_PROXY: ${WEB_PROXY_IP:-10.203.47.10}
+      # The `migrate` service has already migrated and seeded; the API itself cannot change the schema.
+      RUN_MIGRATIONS_ON_BOOT: "false"
+      SEED_ON_BOOT: "false"
+    depends_on:
+      db:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    volumes:
+      - secrets:/run/secrets:ro
+    ports:
+      - "127.0.0.1:${API_PORT:-4000}:4000"
+    networks:
+      - edge
+      - data
+    # SIGTERM → tini → Nest shutdown hooks drain requests and close the pool; give that time before SIGKILL.
+    stop_grace_period: 20s
+    mem_limit: 512m
+    cpus: "1.0"
+    pids_limit: 200
+    # Health: the image's HEALTHCHECK (GET /health every 10 s), which `web` waits for.
+
+  web:
+    <<: [*base, *locked-down]
+    build:
+      context: ./apps/web
+    image: simple-invoice-web:${IMAGE_TAG:-local}
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "${WEB_PORT:-3000}:8080"
+    networks:
+      edge:
+        ipv4_address: ${WEB_PROXY_IP:-10.203.47.10}
+    mem_limit: 128m
+    cpus: "0.5"
+    pids_limit: 100
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+networks:
+  edge:
+    ipam:
+      config:
+        # Outside Docker's default address pools (172.17-31.x, 192.168.x), so it does not collide with other stacks.
+        - subnet: ${EDGE_SUBNET:-10.203.47.0/24}
+          # Dynamic addresses come from the upper half: nginx's fixed address can never be handed to another container.
+          ip_range: ${EDGE_IP_RANGE:-10.203.47.128/25}
+  data: {}
+
+volumes:
+  db-data:
+  secrets:
