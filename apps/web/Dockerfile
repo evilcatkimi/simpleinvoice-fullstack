@@ -11,7 +11,7 @@ COPY . .
 RUN npm run build
 
 # ---- Runtime: static files + /api reverse proxy, as a non-root user ----
-FROM nginxinc/nginx-unprivileged:1.30-alpine@sha256:ed04ec1ff34502c339ee5c3ae3f855442398edc1d05591e2b98981dcbbd20b1e AS runtime
+FROM nginxinc/nginx-unprivileged:1.31-alpine@sha256:b5047b9b76845eac124358373c6852377c52e4b05834a47647e955dd91cb8f1e AS runtime
 # Our nginx.conf replaces the whole configuration; the stock site would only confuse the image's
 # entrypoint scripts (they try to edit it, which fails on a read-only filesystem).
 USER root
